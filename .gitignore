@@ -1,0 +1,95 @@
+# ================================
+# Python
+# ================================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pdb
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+ENV/
+env/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# ================================
+# Environment & Config Files
+# ================================
+# Never commit secrets or environment variables
+*.env
+*.env.* 
+.envrc
+
+# Your project-specific config
+configs/environment.sh
+configs/environment.sh.backup
+configs/*.local
+secrets/
+*.key
+*.json
+
+# GCP
+# Ignore local application default credentials
+gcloud_auth.json
+adc.json
+*.pem
+*.csr
+
+# Local Service Account Keys (VERY IMPORTANT)
+service-account.json
+service-account-*.json
+
+# ================================
+# OS / Editor / IDE files
+# ================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# VS Code
+.vscode/
+
+# JetBrains (PyCharm)
+.idea/
+
+# ================================
+# Logs / Temp Files
+# ================================
+*.log
+*.out
+*.tmp
+*.temp
+
+# ================================
+# Shell script artifacts
+# ================================
+*.pid
+*.lock
+
+# ================================
+# Spark / Dataproc
+# ================================
+# Spark logs / outputs
+spark-warehouse/
+derby.log
+metastore_db/
+
+# ================================
+# Generated data or artifacts
+# ================================
+data/
+output/
+tmp/
+temp/
