@@ -1,0 +1,38 @@
+======================================================================
+DELTA LAKE PAYMENT GATEWAY - VALIDATION REPORT
+======================================================================
+
+Generation Time: 2025-12-02 21:23:27
+Total Rows: 60,000
+Total Size: 10.06MB
+
+=== Day 1 Statistics ===
+Total rows: 15,000
+Tier 1 issues (quarantine): 199
+Tier 2 issues (flag): 200
+Tier 3 issues (fix): 200
+
+=== Day 2 Statistics ===
+Total rows: 15,000
+Tier 1 issues (quarantine): 0
+Tier 2 issues (flag): 0
+Tier 3 issues (fix): 100
+
+=== Day 3 Statistics ===
+Total rows: 15,000
+Tier 1 issues (quarantine): 0
+Tier 2 issues (flag): 0
+Tier 3 issues (fix): 50
+
+=== Day 4 Statistics ===
+Total rows: 15,000
+Tier 1 issues (quarantine): 0
+Tier 2 issues (flag): 0
+Tier 3 issues (fix): 0
+
+=== Late Arrivals ===
+Day 3 late arrivals: 50
+Day 4 late arrivals: 50
+
+=== CDC Updates ===
+Day 4 status updates: 100
