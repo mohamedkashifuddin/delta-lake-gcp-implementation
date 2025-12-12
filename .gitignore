@@ -1,95 +1,117 @@
-# ================================
 # Python
-# ================================
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.pdb
-*.egg-info/
-.eggs/
-dist/
+*.py[cod]
+*$py.class
+*.so
+.Python
 build/
-.venv/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environments
+env/
 venv/
 ENV/
-env/
+env.bak/
+venv.bak/
+.venv/
 
-# Jupyter
-.ipynb_checkpoints/
+# Jupyter Notebook
+.ipynb_checkpoints
+*.ipynb
 
-# ================================
-# Environment & Config Files
-# ================================
-# Never commit secrets or environment variables
-*.env
-*.env.* 
-.envrc
-
-# Your project-specific config
-configs/environment.sh
-configs/environment.sh.backup
-configs/*.local
-secrets/
-*.key
-*.json
-
-# GCP
-# Ignore local application default credentials
-gcloud_auth.json
-adc.json
-*.pem
-*.csr
-
-# Local Service Account Keys (VERY IMPORTANT)
-service-account.json
-service-account-*.json
-
-# ================================
-# OS / Editor / IDE files
-# ================================
-# macOS
-.DS_Store
-.AppleDouble
-.LSOverride
-
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
-# VS Code
+# IDEs
 .vscode/
-
-# JetBrains (PyCharm)
 .idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
 
-# ================================
-# Logs / Temp Files
-# ================================
-*.log
-*.out
-*.tmp
-*.temp
+# GCP Credentials (CRITICAL - DO NOT COMMIT)
+*.json
+*-key.json
+service-account*.json
+credentials.json
+sa-key.json
+gcp-credentials.json
 
-# ================================
-# Shell script artifacts
-# ================================
-*.pid
-*.lock
+# Secrets & Environment Variables
+.env
+.env.local
+.env.*.local
+secrets/
+*.encrypted
+*.key
+*.pem
+*.p12
 
-# ================================
-# Spark / Dataproc
-# ================================
-# Spark logs / outputs
+# Airflow
+airflow.cfg
+airflow.db
+airflow-webserver.pid
+logs/
+dags/__pycache__/
+plugins/__pycache__/
+airflow_home/
+
+# Dataproc / Spark
 spark-warehouse/
 derby.log
 metastore_db/
+*.log
 
-# ================================
-# Generated data or artifacts
-# ================================
-data/
-output/
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+.hypothesis/
+
+# OS Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+Desktop.ini
+
+# Project-Specific
+test_data/
+scratch/
 tmp/
 temp/
+output/
+raw_data/
+*.csv
+*.parquet
+
+# Documentation Drafts
+*-draft.md
+notes.txt
+TODO.md
+
+# Backup Files
+*.bak
+*.backup
+*~.nib
