@@ -1,6 +1,6 @@
 # Delta Lake Payment Gateway Pipeline on GCP
 
-**Status:** 🚧 In Progress | **Current Phase:** Bronze Layer Complete ✅  
+**Status:** 🚧 In Progress | **Current Phase:** Silver Layer Complete ✅  
 **Tech Stack:** Delta Lake, Apache Spark, Airflow, GCP Dataproc, Cloud SQL, BigQuery
 
 ---
@@ -20,25 +20,29 @@ Modern payment gateways need to:
 - Maintain compliance audit trails (prove transaction state at any point in time)
 - Support data corrections (reprocess specific date ranges when errors occur)
 - Query current state efficiently while preserving complete history
-- Minimize Data Egress and Storage Costs for analytics and reporting by avoiding costly loading/reading operations from a proprietary data warehouse.
+- Minimize storage and compute costs for analytics workloads
 
 **Technical Challenge:**  
-Traditional data warehouses (BigQuery-only) struggle with:
-- ❌ Schema evolution (adding columns breaks downstream)
-- ❌ Time travel (can't query "what was revenue on Dec 2 before refunds?")
+Traditional data warehouses (BigQuery-only) have limitations:
+- ❌ Expensive upserts/deletes (Change Data Capture is complex and slow)
 - ❌ Vendor lock-in (proprietary format, hard to migrate)
 - ❌ Expensive historical storage (pay for data you rarely query)
-- ❌ High Read/Write Costs via the BigQuery Storage Connector, where enterprise-scale pipelines (30+ systems) reading/loading gigabytes of data daily incur substantial per-GB/TB costs.
-- ❌ Inefficient Upserts/Deletes (Change Data Capture is complex and slow).
+- ❌ High data movement costs (loading/reading via BigQuery Storage Connector incurs per-GB fees)
+- ❌ Schema evolution complexity (adding columns can break downstream)
 
 **Solution:**  
 Delta Lake on GCP provides:
 - ✅ ACID transactions (no duplicate/missing data)
 - ✅ Schema evolution (add columns without breaking pipeline)
-- ✅ Time travel (query any historical version)
-- ✅ Open Format (Parquet + transaction log, portable, and allows changing between open formats like Delta, Hudi, or Iceberg).
-- ✅ Direct Reporting & Cost Savings: Utilizing BigLake to query Delta tables in GCS directly for BI/reporting, eliminating the need for expensive data loading into BigQuery's managed storage layer.
-- ✅ Upserts/Deletes (MERGE support for efficient Change Data Capture).
+- ✅ Time travel (query any historical version via Delta log)
+- ✅ Open format (Parquet + transaction log, portable across lakehouse platforms)
+- ✅ **Cost savings:** Query Delta tables in GCS directly via BigLake (no data movement, no BigQuery Storage Connector fees)
+- ✅ Efficient upserts/deletes (MERGE support for CDC operations)
+
+**Cost Comparison (25-50 TB Dataset):**
+- BigQuery managed storage: $512-1,024/month (storage only)
+- Delta Lake on GCS: Same storage cost, but **no per-GB read/write fees** for BI tools querying via BigLake
+- **Savings:** Eliminates data movement costs for enterprise pipelines (30+ systems reading gigabytes daily)
 
 ---
 
@@ -49,7 +53,7 @@ You're a data engineer at a payment gateway processing 5.4M transactions/year. Y
 
 1. **Data Quality Problems:**  
    - 0.67% of transactions have NULL IDs → crash the pipeline
-   - 2.67% have negative amounts → need flagging, not blocking
+   - 60.67% have negative amounts or invalid merchants → need flagging, not blocking
    - 1.33% missing device metadata → should default to "UNKNOWN"
 
 2. **Late Arrivals:**  
@@ -63,6 +67,10 @@ You're a data engineer at a payment gateway processing 5.4M transactions/year. Y
 4. **Reprocessing:**  
    - When upstream fixes data errors, need to reload specific dates
    - Current approach: reload entire history (expensive, slow)
+
+5. **Compliance:**  
+   - GDPR/CCPA "Right to be Forgotten" requires permanent deletion
+   - Audit logs must retain history (conflicting requirements)
 
 **Your Task:**  
 Build a Delta Lake pipeline that handles these issues elegantly while maintaining audit trail for compliance.
@@ -81,6 +89,7 @@ Raw CSV Files (GCS)
 │ - Full audit history                │
 │ - 3-tier validation                 │
 │ - Composite key: (txn_id, updated)  │
+│ - 25 columns (17 orig + 8 tracking) │
 └─────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────┐
@@ -88,6 +97,7 @@ Raw CSV Files (GCS)
 │ - Current state only                │
 │ - Business rules applied            │
 │ - Single key: txn_id                │
+│ - 21 columns (removed 4 Bronze-only)│
 └─────────────────────────────────────┘
     ↓
 ┌─────────────────────────────────────┐
@@ -98,6 +108,7 @@ Raw CSV Files (GCS)
 └─────────────────────────────────────┘
     ↓
 Power BI / Tableau / Looker
+(Query via BigQuery BigLake - No data movement!)
 ```
 
 ### Why This Architecture? 
@@ -162,7 +173,7 @@ if amount < 0:
     flag(data_quality_flag="FAILED_VALIDATION")
     load_to_bronze()
 ```
-**Action:** 2.67% of records flagged, analysts investigate
+**Action:** 60.67% of records flagged, analysts investigate (increased for testing)
 
 **Tier 3 - Fix & Load (Missing Optional Data):**
 ```python
@@ -248,6 +259,54 @@ arrival_delay_hours = (updated_at - transaction_timestamp) / 3600
 
 ---
 
+### 5. GDPR Compliance (Dual-Delete Pattern)
+
+**Challenge:** GDPR says "delete all data" but auditors say "keep logs"
+
+**Solution:**
+- **Bronze:** Soft delete (`is_deleted = true`, data preserved for audit)
+- **Silver:** Hard delete (data permanently removed from analytics)
+
+**Workflow:**
+```bash
+# Step 1: Mark deleted in Bronze (audit trail)
+bronze_mark_deleted_by_customer.py --customer_id=USER_0331
+
+# Step 2: Remove from Silver (analytics clean)
+silver_propagate_deletes.py USER_0331
+```
+
+**Result:**
+- Compliance team can prove deletion (Bronze metadata)
+- Business users never see deleted data (Silver removed)
+- Legal requirement satisfied (customer data purged from analytics)
+
+---
+
+### 6. Intra-Batch Deduplication
+
+**Problem Discovered:** Same CSV file had exact duplicate rows (data generator bug + real-world edge case)
+
+**Solution:** Added ROW_NUMBER deduplication in all Bronze jobs:
+```python
+CREATE OR REPLACE TEMP VIEW bronze_staging AS
+SELECT * FROM (
+    SELECT *, 
+        ROW_NUMBER() OVER (
+            PARTITION BY transaction_id, updated_at 
+            ORDER BY transaction_id
+        ) AS row_num
+    FROM filtered_data
+) WHERE row_num = 1
+```
+
+**Impact:**
+- Files updated: `validate_bronze.py`, `bronze_backfill.py`, `bronze_full_refresh.py`
+- Overhead: ~5% slower (worth it to prevent MERGE errors)
+- Defensive coding: Handles upstream retry logic, CDC duplicates
+
+---
+
 ## 📂 Project Structure
 
 ```
@@ -255,30 +314,48 @@ delta-lake-gcp-implementation/
 │
 ├── README.md                          # This file
 │
-├── bronze/                            # Bronze layer (current phase)
+├── bronze/                            # Bronze layer (Blog 3a - Complete ✅)
 │   ├── README.md                      # Bronze documentation
 │   ├── TESTING_GUIDE.md               # Test scenarios & validation
-│   ├── jobs/                          # PySpark jobs
-│   │   ├── validate_bronze.py         # 3-tier validation
+│   ├── jobs/                          # PySpark jobs (4 total)
+│   │   ├── validate_bronze.py         # 3-tier validation + deduplication
 │   │   ├── load_bronze.py             # MERGE with composite key
 │   │   ├── bronze_backfill.py         # Date range reprocessing
 │   │   └── bronze_full_refresh.py     # Complete reload
-│   └── dags/                          # Airflow DAGs
+│   └── dags/                          # Airflow DAGs (3 total)
 │       ├── bronze_incremental_dag.py  # Daily production load
 │       ├── bronze_backfill_dag.py     # Manual date range reload
 │       └── bronze_full_refresh_dag.py # Full rebuild (with confirmation)
 │
-├── silver/                            # Silver layer (next phase)
-│   └── (coming soon)
+├── silver/                            # Silver layer (Blog 3b - Complete ✅)
+│   ├── README.md                      # Silver documentation
+│   ├── RUNBOOK.md                     # Operations guide
+│   ├── HELPER.md                      # Developer extension guide
+│   ├── jobs/                          # PySpark jobs (5 total)
+│   │   ├── validate_silver.py         # Read Bronze, dedupe, write staging
+│   │   ├── load_silver.py             # MERGE staging → silver
+│   │   ├── silver_full_refresh.py     # Rebuild from all Bronze
+│   │   ├── bronze_mark_deleted_by_customer.py  # GDPR soft delete
+│   │   └── silver_propagate_deletes.py         # GDPR hard delete
+│   └── dags/                          # Airflow DAGs (3 total)
+│       ├── silver_incremental_dag.py  # Daily after Bronze completes
+│       ├── silver_full_refresh_dag.py # Manual rebuild
+│       └── bronze_compliance_deletion_dag.py  # GDPR workflow
 │
-├── gold/                              # Gold layer (future)
-│   └── (coming soon)
+├── gold/                              # Gold layer (Blog 3c - Coming Soon)
+│   └── (next phase)
+│
+├── data_generator/                    # Test data generation
+│   ├── generate_payment_data.py       # Enhanced with Silver test data
+│   └── generated_data/                # Output: day1.csv, day2.csv, ...
 │
 └── docs/                              # Shared documentation
     ├── MIGRATION_DOC_COMPLETE.md      # Complete project context
     ├── DATA_LINEAGE.md                # Data flow documentation
     ├── VALIDATION_RULES.md            # Quality rules details
-    └── SCHEMA_REGISTRY.md             # All table schemas
+    ├── SCHEMA_REGISTRY.md             # All table schemas (25 cols Bronze, 21 cols Silver)
+    ├── KNOWN_ISSUES.md                # Side effects & OSS Delta limitations
+    └── MANUAL_COMMANDS.md             # All 9 job commands
 ```
 
 ---
@@ -303,8 +380,8 @@ delta-lake-gcp-implementation/
    - BigQuery external tables via BigLake
 
 3. **Test Data:**
+   - Generate with `data_generator/generate_payment_data.py`
    - Upload CSVs to `gs://your-bucket/raw/20241202/`
-   - See `bronze/TESTING_GUIDE.md` for data generation
 
 ### Quick Start
 
@@ -314,32 +391,38 @@ git clone https://github.com/yourusername/delta-lake-gcp-implementation.git
 cd delta-lake-gcp-implementation
 ```
 
-**2. Deploy Spark jobs to GCS:**
+**2. Generate test data:**
+```bash
+cd data_generator
+python generate_payment_data.py
+# Output: generated_data/day1.csv through day100.csv
+```
+
+**3. Deploy Spark jobs to GCS:**
 ```bash
 gsutil cp bronze/jobs/*.py gs://your-bucket/airflow/jobs/
+gsutil cp silver/jobs/*.py gs://your-bucket/airflow/jobs/
 ```
 
-**3. Deploy DAGs to Composer:**
+**4. Deploy DAGs to Composer:**
 ```bash
 gsutil cp bronze/dags/*.py gs://your-composer-dags-bucket/dags/
+gsutil cp silver/dags/*.py gs://your-composer-dags-bucket/dags/
 ```
 
-**4. Trigger incremental load:**
+**5. Trigger Bronze incremental load:**
 - Go to Airflow UI → `bronze_incremental_load` → Trigger DAG
 - Wait 8-10 minutes
 - Verify: Query `bronze.transactions` in BigQuery
 
-**5. Test backfill:**
-```json
-{
-  "start_date": "2025-11-29",
-  "end_date": "2025-12-01"
-}
-```
-Trigger `bronze_backfill` DAG with this config
+**6. Trigger Silver incremental load:**
+- Airflow UI → `silver_incremental_load` → Trigger DAG
+- Wait 30-60 seconds
+- Verify: Query `silver.transactions` in BigQuery
 
 ### Manual Testing (No Airflow)
 
+**Bronze:**
 ```bash
 # Validate data
 gcloud dataproc jobs submit pyspark \
@@ -356,26 +439,53 @@ gcloud dataproc jobs submit pyspark \
   -- batch-test-001 bronze_incremental_load incremental 90000 100 2025-12-07T10:00:00
 ```
 
+**Silver:**
+```bash
+# Validate (dedupe Bronze → staging)
+gcloud dataproc jobs submit pyspark \
+  gs://your-bucket/airflow/jobs/validate_silver.py \
+  --cluster=your-cluster \
+  --region=us-central1
+
+# Load (MERGE staging → silver)
+gcloud dataproc jobs submit pyspark \
+  gs://your-bucket/airflow/jobs/load_silver.py \
+  --cluster=your-cluster \
+  --region=us-central1
+```
+
+**Full command reference:** See `/docs/MANUAL_COMMANDS.md` (all 9 jobs)
+
 ---
 
 ## 📊 Results & Metrics
 
-**Bronze Layer (Current Phase):**
-- ✅ 89,800 records loaded (90K - 100 tier1 - 100 late updates)
-- ✅ 100 records quarantined (0.67% - Tier 1 failures)
-- ✅ 400 records flagged (2.67% - Tier 2 violations)
-- ✅ 200 records auto-fixed (1.33% - Tier 3 defaults)
+### Bronze Layer (Blog 3a - Complete ✅)
+- ✅ 1,462,039 records loaded (from 1.4M CSV rows)
+- ✅ 1,411 records quarantined (0.67% - Tier 1 failures)
+- ✅ ~900K records flagged (60.67% - Tier 2 violations, intentionally high for testing)
+- ✅ ~19K records auto-fixed (1.33% - Tier 3 defaults)
 - ✅ 150 status updates tracked (multiple versions per transaction)
 
+### Silver Layer (Blog 3b - Complete ✅)
+- ✅ 1,379,914 records deduplicated (from 1.46M Bronze records)
+- ✅ 82,851 duplicates removed (5.66% - audit trail versions)
+- ✅ 1,309 GDPR deletions tested (soft delete Bronze, hard delete Silver)
+- ✅ 810 late arrivals handled (flagged in Bronze, processed in Silver)
+- ✅ 0 duplicate transaction_ids in Silver (deduplication working)
+
 **Performance:**
-- Incremental load: 8-10 min (ephemeral cluster)
-- Backfill (3 days): 8-9 min
-- Full refresh: 8-10 min
+- Bronze incremental: 8-10 min (ephemeral cluster)
+- Bronze full refresh: 8-10 min (1.4M records)
+- Silver incremental: 30-60 sec (0-5K records)
+- Silver full refresh: 69 sec (1.4M records)
+- GDPR deletion: 35 sec (mark + propagate)
 - Query latency: <2 sec (BigQuery external tables)
 
 **Cost Optimization:**
 - Ephemeral clusters: $0.40/hour (vs $292/month always-on)
 - Lifecycle management: Auto-delete after 10 min idle
+- **No data movement fees:** BigQuery queries Delta via BigLake (reads GCS directly)
 - Monthly cost: ~$53 + usage (vs $345 with persistent cluster)
 
 ---
@@ -386,8 +496,8 @@ Follow the implementation journey on Medium:
 
 - **Blog 1-2:** [BigQuery-Native Pipeline](link-to-blog) (baseline)
 - **Blog 3:** [Delta Lake Setup on GCP](link-to-blog) (infrastructure)
-- **Blog 3a:** [Bronze Layer Implementation](link-to-blog) ✅ **Current**
-- **Blog 3b:** Silver Layer (coming soon)
+- **Blog 3a:** [Bronze Layer Implementation](link-to-blog) ✅ **Complete**
+- **Blog 3b:** [Silver Layer - Cleaning the Data](link-to-blog) ✅ **Complete**
 - **Blog 3c:** Gold Layer - Star Schema (coming soon)
 - **Blog 3d:** CDC & Advanced Patterns (coming soon)
 - **Blog 3e:** Operations & Optimization (coming soon)
@@ -395,12 +505,6 @@ Follow the implementation journey on Medium:
 ---
 
 ## 🎯 What's Next
-
-### Silver Layer (Blog 3b)
-- Deduplicate Bronze to current state
-- Apply business transformation rules
-- Handle late arrival updates
-- Soft delete propagation
 
 ### Gold Layer (Blog 3c)
 - Star schema design (fact + dimensions)
@@ -416,35 +520,98 @@ Follow the implementation journey on Medium:
 
 ---
 
+## 📚 Documentation
+
+**Getting Started:**
+- `/README.md` (this file) - Project overview
+- `/docs/MIGRATION_DOC_COMPLETE.md` - Complete migration context
+
+**Layer-Specific:**
+- `/bronze/README.md` - Bronze layer documentation
+- `/silver/README.md` - Silver layer documentation
+- `/silver/RUNBOOK.md` - Operations guide
+- `/silver/HELPER.md` - Developer extension guide
+
+**Technical Reference:**
+- `/docs/SCHEMA_REGISTRY.md` - All table schemas
+- `/docs/VALIDATION_RULES.md` - Data quality rules
+- `/docs/KNOWN_ISSUES.md` - Side effects & limitations
+- `/docs/MANUAL_COMMANDS.md` - All 9 job commands
+
+---
+
+## 🧪 Data Generator Configuration
+
+**Location:** `/data_generator/generate_payment_data.py`
+
+**Key Configuration:**
+```python
+# Output
+ROWS_PER_DAY = 15000          # Transactions per day
+DAYS_TO_GENERATE = range(1, 101)  # 100 days of history
+
+# Data quality issues (for testing validation)
+TIER1_ISSUES_PCT = 0.67       # NULL IDs → quarantine
+TIER2_ISSUES_PCT = 60.67      # Bad data → flag (intentionally high)
+TIER3_ISSUES_PCT = 1.33       # Missing → fix
+
+# Silver layer test data
+SOFT_DELETE_COUNT = 50        # GDPR deletions per day
+LATE_ARRIVAL_COUNT = 50       # Late transactions per day
+STATUS_UPDATE_COUNT = 100     # Status changes per day (Day 4+)
+EXTRA_DUPLICATES_COUNT = 50   # Extra duplicates per day
+
+# Time-aware incremental (Day 4+)
+FRESH_DATA_PCT = 0.30         # 30% recent timestamps
+HISTORICAL_DATA_PCT = 0.70    # 70% historical timestamps
+```
+
+**What It Generates:**
+- 15,000 transactions per day × 100 days = 1.5M transactions
+- 0.67% Tier 1 failures (quarantine)
+- 60.67% Tier 2 violations (flagged, intentionally high for testing)
+- 50 soft deletes per day (GDPR compliance testing)
+- 50 late arrivals per day (late arrival handling)
+- 100 status updates per day (audit trail testing)
+
+**Usage:**
+```bash
+cd data_generator
+python generate_payment_data.py
+# Output: generated_data/day1.csv, day2.csv, ..., day100.csv
+```
+
+---
+
 ## 🤝 Contributing
 
 - This project serves as a proof-of-concept and validation environment for building a robust, cost-efficient, and audit-compliant data architecture using Delta Lake on Google Cloud Platform (GCP).
 - Your feedback is highly valued as it helps validate the architecture's assumptions and utility in real-world enterprise scenarios.
-- If you find this project valuable or have ideas for improvement, please consider the following ways to engage:
+
 **Ways to Engage and Contribute:**
 - ⭐ Star the repo
-- 🐛 Report Bugs/Issues
+- 🐛 Report Bugs/Issues (see `/docs/KNOWN_ISSUES.md` first)
 - 💡 Suggest improvements
-- 📝 Share Your Delta Lake Journey by discussing how you are applying similar concepts or overcoming challenges in your own data environment.
+- 📝 Share Your Delta Lake Journey
 
 ---
 
 ## 📄 License
 
 MIT License - Feel free to use this for learning/portfolio projects
-- Attribution Request: If you use this repository as a basis for your own public work, please link back to it. This helps increase the project's visibility and reach.
+- Attribution Request: If you use this repository as a basis for your own public work, please link back to it.
 
 ---
 
 ## 👤 Author
 
-**[mohamed Kashifuddin]**  
+**[Mohamed Kashifuddin]**  
 Data Engineer | Delta Lake Enthusiast | Cloud Architecture
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/mohamedkashifuddin/)
 [![Medium](https://img.shields.io/badge/Medium-12100E?style=for-the-badge&logo=medium&logoColor=white)](https://medium.com/@mohamed_kashifuddin)
 [![GitHub](https://img.shields.io/badge/GitHub-100000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/mohamedkashifuddin)
-[![Portfolio](https://img.shields.io/badge/Portfolio-FF7139?style=for-the-badge&logo=Firefox&logoColor=white)](https://mohamedkashifuddin.pages.dev)
+[![Portfolio](https://img.shields.io/badge/Portfolio-FF7139?style=for-the-badge&logo=Firefox&logoColor=white)](https://mohamedkashifuddin.com)
 
 📧 Email: mohamedkashifuddin24@gmail.com
 
@@ -455,7 +622,10 @@ Data Engineer | Delta Lake Enthusiast | Cloud Architecture
 - Delta Lake community for documentation
 - Google Cloud for free tier credits
 - Medium data engineering community for inspiration
+- Open source contributors (Spark, Airflow, Delta Lake)
 
 ---
 
 **Built with ❤️ using Delta Lake, Spark, and way too much coffee ☕**
+
+**Project Status:** Bronze ✅ | Silver ✅ | Gold ⏳ | Operations ⏳

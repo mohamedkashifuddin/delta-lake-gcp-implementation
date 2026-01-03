@@ -90,19 +90,21 @@ try:
             t.is_deleted = s.is_deleted,
             t.deleted_at = s.deleted_at,
             t.is_late_arrival = s.is_late_arrival,
-            t.arrival_delay_hours = s.arrival_delay_hours
+            t.arrival_delay_hours = s.arrival_delay_hours,
+            t.data_quality_flag = s.data_quality_flag,
+            t.validation_errors = s.validation_errors
         WHEN NOT MATCHED THEN INSERT (
             transaction_id, customer_id, transaction_timestamp, merchant_id, merchant_name,
             product_category, product_name, amount, fee_amount, cashback_amount,
             loyalty_points, payment_method, transaction_status, device_type, location_type,
             currency, updated_at, delta_change_type, delta_version, is_deleted, deleted_at,
-            is_late_arrival, arrival_delay_hours
+            is_late_arrival, arrival_delay_hours, data_quality_flag, validation_errors
         ) VALUES (
             s.transaction_id, s.customer_id, s.transaction_timestamp, s.merchant_id, s.merchant_name,
             s.product_category, s.product_name, s.amount, s.fee_amount, s.cashback_amount,
             s.loyalty_points, s.payment_method, s.transaction_status, s.device_type, s.location_type,
             s.currency, s.updated_at, s.delta_change_type, s.delta_version, s.is_deleted, s.deleted_at,
-            s.is_late_arrival, s.arrival_delay_hours
+            s.is_late_arrival, s.arrival_delay_hours, s.data_quality_flag, s.validation_errors
         )
     """)
     
