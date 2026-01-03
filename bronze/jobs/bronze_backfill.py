@@ -11,8 +11,8 @@ spark = SparkSession.builder \
     .getOrCreate()
 
 RAW_PATH = sys.argv[1]
-START_DATE = sys.argv[2]  # Format: 2025-11-29
-END_DATE = sys.argv[3]    # Format: 2025-12-01
+START_DATE = sys.argv[2]
+END_DATE = sys.argv[3]
 BATCH_ID = sys.argv[4]
 
 print(f"=== BRONZE BACKFILL ===")
@@ -20,24 +20,22 @@ print(f"RAW_PATH: {RAW_PATH}")
 print(f"Date Range: {START_DATE} to {END_DATE}")
 print(f"BATCH_ID: {BATCH_ID}")
 
-# Read raw CSV
 raw_df = spark.read.format("csv").option("header", "true").load(RAW_PATH)
 raw_df.createOrReplaceTempView("raw_data")
 
-# Apply schema casting and date filter
 spark.sql(f"""
     CREATE OR REPLACE TEMP VIEW filtered_data AS
     SELECT 
         CAST(transaction_id AS STRING) AS transaction_id,
         CAST(customer_id AS STRING) AS customer_id,
-        CAST(transaction_timestamp AS TIMESTAMP) AS transaction_timestamp,
+        CAST(SUBSTRING(transaction_timestamp, 1, 19) AS TIMESTAMP) AS transaction_timestamp,
         CAST(merchant_id AS STRING) AS merchant_id,
         CAST(merchant_name AS STRING) AS merchant_name,
         CAST(product_category AS STRING) AS product_category,
         CAST(product_name AS STRING) AS product_name,
-        CAST(amount AS DECIMAL(10,2)) AS amount,
-        CAST(fee_amount AS DECIMAL(10,2)) AS fee_amount,
-        CAST(cashback_amount AS DECIMAL(10,2)) AS cashback_amount,
+        CAST(amount AS DOUBLE) AS amount,
+        CAST(fee_amount AS DOUBLE) AS fee_amount,
+        CAST(cashback_amount AS DOUBLE) AS cashback_amount,
         CAST(loyalty_points AS INT) AS loyalty_points,
         CAST(payment_method AS STRING) AS payment_method,
         CAST(transaction_status AS STRING) AS transaction_status,
@@ -59,7 +57,6 @@ if total_records == 0:
     spark.stop()
     sys.exit(0)
 
-# Tier 1 validation - Quarantine
 spark.sql("""
     CREATE OR REPLACE TEMP VIEW bronze_quarantine_staging AS
     SELECT 
@@ -87,6 +84,7 @@ spark.sql("""
             WHEN transaction_id LIKE '% %' THEN 'INVALID_TRANSACTION_ID_FORMAT'
             WHEN amount IS NULL THEN 'NULL_AMOUNT'
             WHEN transaction_timestamp IS NULL THEN 'NULL_TIMESTAMP'
+            WHEN transaction_timestamp > CURRENT_TIMESTAMP() THEN 'FUTURE_TIMESTAMP'
             ELSE 'UNKNOWN_TIER1_ERROR'
         END AS error_reason,
         'TIER_1' AS error_tier,
@@ -98,6 +96,7 @@ spark.sql("""
        OR transaction_id LIKE '% %'
        OR amount IS NULL 
        OR transaction_timestamp IS NULL
+       OR transaction_timestamp > CURRENT_TIMESTAMP()
 """)
 
 records_quarantined = spark.sql("SELECT COUNT(*) as cnt FROM bronze_quarantine_staging").first()['cnt']
@@ -106,44 +105,59 @@ print(f"Tier 1 Quarantined: {records_quarantined}")
 if records_quarantined > 0:
     spark.sql("INSERT INTO bronze.quarantine SELECT * FROM bronze_quarantine_staging")
 
-# Tier 2 & 3 validation - Apply defaults and prepare for MERGE
+# Create temp view with deduplication
 spark.sql(f"""
     CREATE OR REPLACE TEMP VIEW bronze_staging AS
-    SELECT 
-        transaction_id,
-        customer_id,
-        transaction_timestamp,
-        merchant_id,
-        COALESCE(merchant_name, 'UNKNOWN_MERCHANT') AS merchant_name,
-        product_category,
-        COALESCE(product_name, 'NOT_AVAILABLE') AS product_name,
-        amount,
-        fee_amount,
-        cashback_amount,
-        loyalty_points,
-        payment_method,
-        transaction_status,
-        COALESCE(device_type, 'UNKNOWN') AS device_type,
-        COALESCE(location_type, 'NOT_AVAILABLE') AS location_type,
-        currency,
-        updated_at,
-        'BACKFILL' AS delta_change_type,
-        CAST(NULL AS INT) AS delta_version,
-        FALSE AS is_deleted,
-        CAST(NULL AS TIMESTAMP) AS deleted_at,
-        FALSE AS is_late_arrival,
-        CAST(NULL AS INT) AS arrival_delay_hours
-    FROM filtered_data
-    WHERE NOT (transaction_id IS NULL 
-            OR transaction_id LIKE '% %'
-            OR amount IS NULL 
-            OR transaction_timestamp IS NULL)
+    SELECT * FROM (
+        SELECT 
+            transaction_id,
+            customer_id,
+            transaction_timestamp,
+            merchant_id,
+            COALESCE(merchant_name, 'UNKNOWN_MERCHANT') AS merchant_name,
+            product_category,
+            COALESCE(product_name, 'NOT_AVAILABLE') AS product_name,
+            amount,
+            fee_amount,
+            cashback_amount,
+            loyalty_points,
+            payment_method,
+            transaction_status,
+            COALESCE(device_type, 'UNKNOWN') AS device_type,
+            COALESCE(location_type, 'NOT_AVAILABLE') AS location_type,
+            currency,
+            updated_at,
+            'BACKFILL' AS delta_change_type,
+            CAST(NULL AS INT) AS delta_version,
+            FALSE AS is_deleted,
+            CAST(NULL AS TIMESTAMP) AS deleted_at,
+            FALSE AS is_late_arrival,
+            CAST(NULL AS INT) AS arrival_delay_hours,
+            CASE
+                WHEN amount < 0 
+                    OR merchant_id IS NULL 
+                    OR transaction_status NOT IN ('Successful', 'Pending', 'Failed')
+                THEN 'FAILED_VALIDATION'
+                ELSE 'PASSED'
+            END AS data_quality_flag,
+            CONCAT_WS(';',
+                CASE WHEN amount < 0 THEN 'NEGATIVE_AMOUNT' END,
+                CASE WHEN merchant_id IS NULL THEN 'NULL_MERCHANT_ID' END,
+                CASE WHEN transaction_status NOT IN ('Successful', 'Pending', 'Failed') THEN 'INVALID_STATUS' END
+            ) AS validation_errors,
+            ROW_NUMBER() OVER (PARTITION BY transaction_id, updated_at ORDER BY transaction_id) AS row_num
+        FROM filtered_data
+        WHERE NOT (transaction_id IS NULL 
+                OR transaction_id LIKE '% %'
+                OR amount IS NULL 
+                OR transaction_timestamp IS NULL
+                OR transaction_timestamp > CURRENT_TIMESTAMP())
+    ) WHERE row_num = 1
 """)
 
 records_to_merge = spark.sql("SELECT COUNT(*) as cnt FROM bronze_staging").first()['cnt']
 print(f"Records to backfill: {records_to_merge}")
 
-# MERGE with replaceWhere (partition overwrite for date range)
 spark.sql(f"""
     MERGE INTO bronze.transactions t
     USING bronze_staging s
@@ -170,25 +184,26 @@ spark.sql(f"""
         t.is_deleted = s.is_deleted,
         t.deleted_at = s.deleted_at,
         t.is_late_arrival = s.is_late_arrival,
-        t.arrival_delay_hours = s.arrival_delay_hours
+        t.arrival_delay_hours = s.arrival_delay_hours,
+        t.data_quality_flag = s.data_quality_flag,
+        t.validation_errors = s.validation_errors
     WHEN NOT MATCHED THEN INSERT (
         transaction_id, customer_id, transaction_timestamp, merchant_id, merchant_name,
         product_category, product_name, amount, fee_amount, cashback_amount,
         loyalty_points, payment_method, transaction_status, device_type, location_type,
         currency, updated_at, delta_change_type, delta_version, is_deleted, deleted_at,
-        is_late_arrival, arrival_delay_hours
+        is_late_arrival, arrival_delay_hours, data_quality_flag, validation_errors
     ) VALUES (
         s.transaction_id, s.customer_id, s.transaction_timestamp, s.merchant_id, s.merchant_name,
         s.product_category, s.product_name, s.amount, s.fee_amount, s.cashback_amount,
         s.loyalty_points, s.payment_method, s.transaction_status, s.device_type, s.location_type,
         s.currency, s.updated_at, s.delta_change_type, s.delta_version, s.is_deleted, s.deleted_at,
-        s.is_late_arrival, s.arrival_delay_hours
+        s.is_late_arrival, s.arrival_delay_hours, s.data_quality_flag, s.validation_errors
     )
 """)
 
 print(f"Backfill MERGE completed: {records_to_merge} records")
 
-# Write job control metadata
 completed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
 
