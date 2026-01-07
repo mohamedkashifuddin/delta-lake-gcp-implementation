@@ -601,4 +601,4 @@ silver_df = bronze_df.join(
 
 ---
 
-**Last Updated:** January 2026 | **Maintainer:** [Your Name]
+**Last Updated:** January 2026 | **Maintainer:** Mohamed Kashifuddin
