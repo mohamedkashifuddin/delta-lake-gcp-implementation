@@ -14,7 +14,7 @@ OUTPUT_PATH = os.path.join(SCRIPT_DIR, "generated_data")
 ROWS_PER_DAY = 15000
 
 # INITIAL LOAD: Generate 90 days of historical data
-DAYS_TO_GENERATE = list(range(1, 101))  # [1, 2, 3, ..., 90]
+DAYS_TO_GENERATE = list(range(1, 102))  # [1, 2, 3, ..., 90]
 
 # INCREMENTAL MODE: Uncomment and modify when adding more days
 # DAYS_TO_GENERATE = list(range(1, 94))  # Adds day91, 92, 93
