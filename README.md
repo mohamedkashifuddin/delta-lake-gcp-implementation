@@ -1,6 +1,6 @@
 # Delta Lake Payment Gateway Pipeline on GCP
 
-**Status:** 🚧 In Progress | **Current Phase:** Silver Layer Complete ✅  
+**Status:** 🚀 Bronze-Silver-Gold Pipeline Complete ✅  
 **Tech Stack:** Delta Lake, Apache Spark, Airflow, GCP Dataproc, Cloud SQL, BigQuery
 
 ---
@@ -9,7 +9,7 @@
 
 ### What Is This?
 
-A production-grade data pipeline that processes payment gateway transactions using **Delta Lake lakehouse architecture** on Google Cloud Platform. The pipeline handles 15,000 daily transactions with built-in data quality validation, audit trail tracking, and flexible reprocessing capabilities.
+A production-grade data pipeline that processes payment gateway transactions using **Delta Lake lakehouse architecture** on Google Cloud Platform. The pipeline handles 15,000 daily transactions with built-in data quality validation, audit trail tracking, and star schema analytics.
 
 ### Why This Project?
 
@@ -20,6 +20,7 @@ Modern payment gateways need to:
 - Maintain compliance audit trails (prove transaction state at any point in time)
 - Support data corrections (reprocess specific date ranges when errors occur)
 - Query current state efficiently while preserving complete history
+- Deliver sub-second BI queries for executives
 - Minimize storage and compute costs for analytics workloads
 
 **Technical Challenge:**  
@@ -29,6 +30,7 @@ Traditional data warehouses (BigQuery-only) have limitations:
 - ❌ Expensive historical storage (pay for data you rarely query)
 - ❌ High data movement costs (loading/reading via BigQuery Storage Connector incurs per-GB fees)
 - ❌ Schema evolution complexity (adding columns can break downstream)
+- ❌ Slow BI queries (string-based JOINs, no pre-aggregation)
 
 **Solution:**  
 Delta Lake on GCP provides:
@@ -38,6 +40,7 @@ Delta Lake on GCP provides:
 - ✅ Open format (Parquet + transaction log, portable across lakehouse platforms)
 - ✅ **Cost savings:** Query Delta tables in GCS directly via BigLake (no data movement, no BigQuery Storage Connector fees)
 - ✅ Efficient upserts/deletes (MERGE support for CDC operations)
+- ✅ **Fast analytics:** Star schema with surrogate keys (3-second queries vs 45-second normalized queries)
 
 **Cost Comparison (25-50 TB Dataset):**
 - BigQuery managed storage: $512-1,024/month (storage only)
@@ -72,8 +75,13 @@ You're a data engineer at a payment gateway processing 5.4M transactions/year. Y
    - GDPR/CCPA "Right to be Forgotten" requires permanent deletion
    - Audit logs must retain history (conflicting requirements)
 
+6. **Analytics Performance:**
+   - VP complains dashboard takes 45 seconds to load
+   - BI queries need customer tier from 6 months ago (not current tier)
+   - String-based JOINs slow down aggregations
+
 **Your Task:**  
-Build a Delta Lake pipeline that handles these issues elegantly while maintaining audit trail for compliance.
+Build a Delta Lake pipeline that handles these issues elegantly with Bronze → Silver → Gold lakehouse architecture.
 
 ---
 
@@ -102,9 +110,11 @@ Raw CSV Files (GCS)
     ↓
 ┌─────────────────────────────────────┐
 │ Gold Layer (Star Schema)            │
-│ - Fact: Transactions                │
-│ - Dims: Customer, Merchant (SCD2)  │
-│ - Optimized for BI queries          │
+│ - 1 Fact: Transactions (1.38M rows) │
+│ - 5 Dims: Customer, Merchant (SCD2),│
+│   Date, Payment Method, Status      │
+│ - Integer surrogate keys (fast JOIN)│
+│ - Pre-calculated measures           │
 └─────────────────────────────────────┘
     ↓
 Power BI / Tableau / Looker
@@ -116,10 +126,13 @@ Power BI / Tableau / Looker
 **Hybrid Strategy:**
 - **Bronze = Full History:** Stores every transaction version (Pending → Successful → Refunded) using composite key `(transaction_id, updated_at)`. Enables compliance queries like "prove transaction status on Dec 2".
 - **Silver = Current State:** Deduplicates Bronze to single version per transaction. Optimized for "what's happening now" queries.
-- **Gold = Analytics:** Star schema with fact table + dimensions. BI tools query this for dashboards.
+- **Gold = Analytics:** Star schema with fact table + dimensions. BI tools query this for sub-second dashboards. SCD Type 2 preserves historical customer/merchant attributes.
 
 **Why not store history in Gold?**  
 Gold prioritizes query performance. Storing 3 versions of every transaction slows down "current revenue" queries. Bronze serves compliance, Gold serves analytics.
+
+**Why star schema in Gold?**  
+String-based JOINs in Silver (45 sec queries) → Integer surrogate keys in Gold (3 sec queries). Pre-calculated measures eliminate runtime aggregation.
 
 ---
 
@@ -283,7 +296,45 @@ silver_propagate_deletes.py USER_0331
 
 ---
 
-### 6. Intra-Batch Deduplication
+### 6. Star Schema with SCD Type 2
+
+**Challenge:** VP asks "What was revenue from Platinum customers in Q2 2024?"
+
+**Without SCD Type 2:**
+```sql
+-- Wrong: Shows all customers as current tier (misleading)
+SELECT SUM(amount) FROM fact_transactions f
+JOIN dim_customer c ON f.customer_key = c.customer_key
+WHERE c.customer_tier = 'Platinum' AND f.date_key BETWEEN 20240401 AND 20240630
+```
+
+**With SCD Type 2:**
+```sql
+-- Correct: Shows tier at point in time
+SELECT SUM(amount) FROM fact_transactions f
+JOIN dim_customer c ON f.customer_key = c.customer_key
+WHERE c.customer_tier = 'Platinum' 
+  AND c.effective_start_date <= '2024-06-30'
+  AND c.effective_end_date >= '2024-04-01'
+  AND f.date_key BETWEEN 20240401 AND 20240630
+```
+
+**Example SCD Type 2:**
+```
+customer_key | customer_id | tier     | effective_start | effective_end | is_current
+1            | USER_001    | Bronze   | 2023-01-01      | 2024-06-30    | false
+2            | USER_001    | Silver   | 2024-07-01      | 2025-12-31    | false
+3            | USER_001    | Gold     | 2026-01-01      | 9999-12-31    | true
+```
+
+**Performance benefit:**
+- Silver query (string JOINs): 45 seconds
+- Gold query (integer surrogate keys): 3 seconds
+- **15x faster analytics**
+
+---
+
+### 7. Intra-Batch Deduplication
 
 **Problem Discovered:** Same CSV file had exact duplicate rows (data generator bug + real-world edge case)
 
@@ -342,20 +393,37 @@ delta-lake-gcp-implementation/
 │       ├── silver_full_refresh_dag.py # Manual rebuild
 │       └── bronze_compliance_deletion_dag.py  # GDPR workflow
 │
-├── gold/                              # Gold layer (Blog 3c - Coming Soon)
-│   └── (next phase)
+├── gold/                              # Gold layer (Blog 3c - Complete ✅)
+│   ├── README.md                      # Gold documentation & architecture
+│   ├── DEVELOPER_GUIDE.md             # Extension guide (add dimensions, SCD Type 2)
+│   ├── dim/                           # Dimension jobs (5 total)
+│   │   ├── gold_dim_date.py           # Static: 2,192 dates (2023-2028)
+│   │   ├── gold_dim_payment_methods.py # Static: 5 methods
+│   │   ├── gold_dim_status.py         # Static: 3 statuses
+│   │   ├── gold_dim_customer_scd2.py  # SCD Type 2: 1,000 customers
+│   │   └── gold_dim_merchant_scd2.py  # SCD Type 2: 500 merchants
+│   ├── fact/                          # Fact table jobs (3 total)
+│   │   ├── validate_fact_transactions.py  # JOIN dimensions, write staging
+│   │   ├── load_fact_transactions.py      # MERGE staging → fact
+│   │   └── fact_full_refresh.py           # Rebuild entire fact table
+│   └── dags/                          # Airflow DAGs (5 total)
+│       ├── gold_static_dims_dag.py        # One-time: Load static dimensions
+│       ├── gold_dim_customer_scd2_dag.py  # Daily 4 AM: Customer SCD Type 2
+│       ├── gold_dim_merchant_scd2_dag.py  # Daily 4 AM: Merchant SCD Type 2
+│       ├── gold_fact_transactions_incremental_dag.py  # Daily 5 AM: Fact load
+│       └── gold_fact_full_refresh_dag.py  # Manual: Fact rebuild
 │
 ├── data_generator/                    # Test data generation
-│   ├── generate_payment_data.py       # Enhanced with Silver test data
+│   ├── generate_payment_data.py       # Enhanced with all layer test data
 │   └── generated_data/                # Output: day1.csv, day2.csv, ...
 │
 └── docs/                              # Shared documentation
     ├── MIGRATION_DOC_COMPLETE.md      # Complete project context
     ├── DATA_LINEAGE.md                # Data flow documentation
     ├── VALIDATION_RULES.md            # Quality rules details
-    ├── SCHEMA_REGISTRY.md             # All table schemas (25 cols Bronze, 21 cols Silver)
+    ├── SCHEMA_REGISTRY.md             # All table schemas (Bronze/Silver/Gold)
     ├── KNOWN_ISSUES.md                # Side effects & OSS Delta limitations
-    └── MANUAL_COMMANDS.md             # All 9 job commands
+    └── MANUAL_COMMANDS.md             # All job commands (Bronze/Silver/Gold)
 ```
 
 ---
@@ -387,7 +455,7 @@ delta-lake-gcp-implementation/
 
 **1. Clone repository:**
 ```bash
-git clone https://github.com/yourusername/delta-lake-gcp-implementation.git
+git clone https://github.com/mohamedkashifuddin/delta-lake-gcp-implementation.git
 cd delta-lake-gcp-implementation
 ```
 
@@ -402,23 +470,49 @@ python generate_payment_data.py
 ```bash
 gsutil cp bronze/jobs/*.py gs://your-bucket/airflow/jobs/
 gsutil cp silver/jobs/*.py gs://your-bucket/airflow/jobs/
+gsutil cp gold/dim/*.py gs://your-bucket/airflow/jobs/
+gsutil cp gold/fact/*.py gs://your-bucket/airflow/jobs/
 ```
 
 **4. Deploy DAGs to Composer:**
 ```bash
 gsutil cp bronze/dags/*.py gs://your-composer-dags-bucket/dags/
 gsutil cp silver/dags/*.py gs://your-composer-dags-bucket/dags/
+gsutil cp gold/dags/*.py gs://your-composer-dags-bucket/dags/
 ```
 
-**5. Trigger Bronze incremental load:**
-- Go to Airflow UI → `bronze_incremental_load` → Trigger DAG
-- Wait 8-10 minutes
-- Verify: Query `bronze.transactions` in BigQuery
+**5. Load static dimensions (one-time):**
+- Airflow UI → `gold_static_dimensions_load` → Trigger with `{"confirm_load": "YES"}`
+- Wait 3 minutes
+- Verify: Query `gold.dim_date`, `gold.dim_payment_method`, `gold.dim_status` in BigQuery
 
-**6. Trigger Silver incremental load:**
-- Airflow UI → `silver_incremental_load` → Trigger DAG
-- Wait 30-60 seconds
-- Verify: Query `silver.transactions` in BigQuery
+**6. Trigger Bronze → Silver → Gold pipeline:**
+- Airflow UI → `bronze_incremental_load` → Trigger DAG
+- Silver runs automatically (ExternalTaskSensor waits for Bronze)
+- Gold dimensions run automatically (wait for Silver)
+- Gold fact runs automatically (waits for dimensions)
+- Total pipeline: ~15 minutes end-to-end
+
+**7. Verify Gold layer:**
+```sql
+-- Check dimension keys populated
+SELECT 
+    SUM(CASE WHEN customer_key IS NULL THEN 1 ELSE 0 END) as null_customer,
+    SUM(CASE WHEN merchant_key IS NULL THEN 1 ELSE 0 END) as null_merchant
+FROM `gold_dataset.fact_transactions`;
+-- Should return: 0, 0
+
+-- Test star schema query (< 3 seconds)
+SELECT 
+    dc.customer_tier,
+    COUNT(*) as transactions,
+    SUM(f.amount) as total_amount,
+    SUM(f.gateway_revenue) as total_revenue
+FROM `gold_dataset.fact_transactions` f
+JOIN `gold_dataset.dim_customer` dc 
+    ON f.customer_key = dc.customer_key AND dc.is_current = true
+GROUP BY dc.customer_tier;
+```
 
 ### Manual Testing (No Airflow)
 
@@ -454,7 +548,37 @@ gcloud dataproc jobs submit pyspark \
   --region=us-central1
 ```
 
-**Full command reference:** See `/docs/MANUAL_COMMANDS.md` (all 9 jobs)
+**Gold (Dimensions):**
+```bash
+# Load static dimensions (one-time)
+gcloud dataproc jobs submit pyspark \
+  gs://your-bucket/airflow/jobs/gold_dim_date.py \
+  --cluster=your-cluster \
+  --region=us-central1
+
+# Load customer dimension (SCD Type 2)
+gcloud dataproc jobs submit pyspark \
+  gs://your-bucket/airflow/jobs/gold_dim_customer_scd2.py \
+  --cluster=your-cluster \
+  --region=us-central1
+```
+
+**Gold (Fact):**
+```bash
+# Validate fact (JOIN dimensions)
+gcloud dataproc jobs submit pyspark \
+  gs://your-bucket/airflow/jobs/validate_fact_transactions.py \
+  --cluster=your-cluster \
+  --region=us-central1
+
+# Load fact (MERGE to fact table)
+gcloud dataproc jobs submit pyspark \
+  gs://your-bucket/airflow/jobs/load_fact_transactions.py \
+  --cluster=your-cluster \
+  --region=us-central1
+```
+
+**Full command reference:** See `/docs/MANUAL_COMMANDS.md` (all 17 jobs)
 
 ---
 
@@ -474,19 +598,33 @@ gcloud dataproc jobs submit pyspark \
 - ✅ 810 late arrivals handled (flagged in Bronze, processed in Silver)
 - ✅ 0 duplicate transaction_ids in Silver (deduplication working)
 
+### Gold Layer (Blog 3c - Complete ✅)
+- ✅ 1,380,856 fact records (1.38M transactions with dimension keys)
+- ✅ 1,000 customers (SCD Type 2 tracking tier changes)
+- ✅ 500 merchants (SCD Type 2 tracking name changes)
+- ✅ 2,192 dates (2023-2028 calendar)
+- ✅ 5 payment methods, 3 statuses (static dimensions)
+- ✅ 0 NULL dimension keys (perfect referential integrity)
+- ✅ Query performance: 3 seconds (vs 45 seconds on Silver)
+
 **Performance:**
 - Bronze incremental: 8-10 min (ephemeral cluster)
 - Bronze full refresh: 8-10 min (1.4M records)
 - Silver incremental: 30-60 sec (0-5K records)
 - Silver full refresh: 69 sec (1.4M records)
+- Gold dimensions: 2 min each (customer, merchant SCD Type 2)
+- Gold fact validate: 3.5 min (JOIN 5 dimensions)
+- Gold fact load: 2.5 min (MERGE 1.38M records)
 - GDPR deletion: 35 sec (mark + propagate)
-- Query latency: <2 sec (BigQuery external tables)
+- **End-to-end pipeline:** 15 min (Bronze → Silver → Gold)
+- **BI query latency:** <3 sec (star schema with surrogate keys)
 
 **Cost Optimization:**
 - Ephemeral clusters: $0.40/hour (vs $292/month always-on)
 - Lifecycle management: Auto-delete after 10 min idle
 - **No data movement fees:** BigQuery queries Delta via BigLake (reads GCS directly)
 - Monthly cost: ~$53 + usage (vs $345 with persistent cluster)
+- **Gold daily cost:** $0.05/day = $1.50/month
 
 ---
 
@@ -498,25 +636,29 @@ Follow the implementation journey on Medium:
 - **Blog 3:** [Delta Lake Setup on GCP](link-to-blog) (infrastructure)
 - **Blog 3a:** [Bronze Layer Implementation](link-to-blog) ✅ **Complete**
 - **Blog 3b:** [Silver Layer - Cleaning the Data](link-to-blog) ✅ **Complete**
-- **Blog 3c:** Gold Layer - Star Schema (coming soon)
-- **Blog 3d:** CDC & Advanced Patterns (coming soon)
+- **Blog 3c:** [Gold Layer - Star Schema with SCD Type 2](link-to-blog) ✅ **Complete**
+- **Blog 3d:** Airflow Orchestration & Monitoring (coming soon)
 - **Blog 3e:** Operations & Optimization (coming soon)
 
 ---
 
 ## 🎯 What's Next
 
-### Gold Layer (Blog 3c)
-- Star schema design (fact + dimensions)
-- SCD Type 2 for customers/merchants
-- Surrogate key generation
-- BI-optimized queries
+### Orchestration & Monitoring (Blog 3d)
+- Complex DAG patterns (parallel dimensions, sequential fact)
+- Error recovery strategies
+- Data quality monitoring
+- SLA tracking & alerting
+- Late arrival dashboards
 
-### Operations (Blog 3e)
+### Operations & Optimization (Blog 3e)
 - Compaction (merge small files)
 - Z-ordering (locality optimization)
 - Vacuum (delete old file versions)
-- Monitoring dashboards
+- Performance tuning (partition strategies)
+- Scaling patterns (10M+ rows)
+
+**Note:** Blogs 3a-3c give you a **production-ready pipeline**. Blogs 3d-3e add enterprise-grade monitoring and optimization.
 
 ---
 
@@ -528,15 +670,18 @@ Follow the implementation journey on Medium:
 
 **Layer-Specific:**
 - `/bronze/README.md` - Bronze layer documentation
+- `/bronze/TESTING_GUIDE.md` - Bronze test scenarios
 - `/silver/README.md` - Silver layer documentation
-- `/silver/RUNBOOK.md` - Operations guide
-- `/silver/HELPER.md` - Developer extension guide
+- `/silver/RUNBOOK.md` - Silver operations guide
+- `/silver/HELPER.md` - Silver developer extension guide
+- `/gold/README.md` - Gold layer architecture & jobs
+- `/gold/DEVELOPER_GUIDE.md` - Gold extension guide (add dimensions, SCD Type 2)
 
 **Technical Reference:**
-- `/docs/SCHEMA_REGISTRY.md` - All table schemas
+- `/docs/SCHEMA_REGISTRY.md` - All table schemas (Bronze/Silver/Gold)
 - `/docs/VALIDATION_RULES.md` - Data quality rules
 - `/docs/KNOWN_ISSUES.md` - Side effects & limitations
-- `/docs/MANUAL_COMMANDS.md` - All 9 job commands
+- `/docs/MANUAL_COMMANDS.md` - All 17 job commands
 
 ---
 
@@ -573,6 +718,7 @@ HISTORICAL_DATA_PCT = 0.70    # 70% historical timestamps
 - 50 soft deletes per day (GDPR compliance testing)
 - 50 late arrivals per day (late arrival handling)
 - 100 status updates per day (audit trail testing)
+- SCD Type 2 changes (customer tier upgrades, merchant name changes)
 
 **Usage:**
 ```bash
@@ -589,10 +735,11 @@ python generate_payment_data.py
 - Your feedback is highly valued as it helps validate the architecture's assumptions and utility in real-world enterprise scenarios.
 
 **Ways to Engage and Contribute:**
-- ⭐ Star the repo
+- ⭐ Star the repo if you found it useful
 - 🐛 Report Bugs/Issues (see `/docs/KNOWN_ISSUES.md` first)
-- 💡 Suggest improvements
-- 📝 Share Your Delta Lake Journey
+- 💡 Suggest improvements or new features
+- 📝 Share Your Delta Lake Journey (write a blog, tag this repo)
+- 🔀 Fork and adapt for your use case (e-commerce, logistics, IoT)
 
 ---
 
@@ -605,13 +752,13 @@ MIT License - Feel free to use this for learning/portfolio projects
 
 ## 👤 Author
 
-**[Mohamed Kashifuddin]**  
+**Mohamed Kashifuddin**  
 Data Engineer | Delta Lake Enthusiast | Cloud Architecture
 
 [![LinkedIn](https://img.shields.io/badge/LinkedIn-0077B5?style=for-the-badge&logo=linkedin&logoColor=white)](https://www.linkedin.com/in/mohamedkashifuddin/)
 [![Medium](https://img.shields.io/badge/Medium-12100E?style=for-the-badge&logo=medium&logoColor=white)](https://medium.com/@mohamed_kashifuddin)
 [![GitHub](https://img.shields.io/badge/GitHub-100000?style=for-the-badge&logo=github&logoColor=white)](https://github.com/mohamedkashifuddin)
-[![Portfolio](https://img.shields.io/badge/Portfolio-FF7139?style=for-the-badge&logo=Firefox&logoColor=white)](https://mohamedkashifuddin.com)
+[![Portfolio](https://img.shields.io/badge/Portfolio-FF7139?style=for-the-badge&logo=Firefox&logoColor=white)](https://mohamedkashifuddin.pages.dev)
 
 📧 Email: mohamedkashifuddin24@gmail.com
 
@@ -619,13 +766,34 @@ Data Engineer | Delta Lake Enthusiast | Cloud Architecture
 
 ## 🙏 Acknowledgments
 
-- Delta Lake community for documentation
-- Google Cloud for free tier credits
+- Delta Lake community for excellent documentation
+- Google Cloud for free tier credits ($300)
 - Medium data engineering community for inspiration
 - Open source contributors (Spark, Airflow, Delta Lake)
+- Ralph Kimball for dimensional modeling methodology
 
 ---
 
 **Built with ❤️ using Delta Lake, Spark, and way too much coffee ☕**
 
-**Project Status:** Bronze ✅ | Silver ✅ | Gold ⏳ | Operations ⏳
+**Project Status:** Bronze ✅ | Silver ✅ | Gold ✅ | Orchestration ⏳ | Operations ⏳
+
+---
+
+## 🏆 Production-Ready Achievement Unlocked
+
+This pipeline is **ready for production use**. You have:
+- ✅ Full audit trail (Bronze layer)
+- ✅ Clean analytics data (Silver layer)
+- ✅ Fast BI queries (Gold star schema)
+- ✅ Historical tracking (SCD Type 2)
+- ✅ GDPR compliance (dual-delete pattern)
+- ✅ Data quality validation (3-tier)
+- ✅ Multiple load patterns (incremental, backfill, full refresh)
+- ✅ Cost optimization (ephemeral clusters, BigLake)
+
+**What's left?** Blogs 3d-3e add monitoring, alerting, and performance tuning - but your pipeline **works** right now.
+
+Clone it. Run it. Break it. Fix it. Learn from it. Then build your own version.
+
+Happy data engineering! 🚀
